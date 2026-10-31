@@ -7,6 +7,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
+from .assistant import build_messages, retrieve
 from .config import settings
 
 app = FastAPI()
@@ -30,10 +31,13 @@ class ChatRequest(BaseModel):
 
 
 async def token_stream(messages: list[Message]):
+    history = [m.model_dump() for m in messages]
+    query = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+    chunks = await retrieve(client, query) if query else []
     stream = await client.chat.completions.create(
         model=settings.llm_model,
         messages=cast(
-            list[ChatCompletionMessageParam], [m.model_dump() for m in messages]
+            list[ChatCompletionMessageParam], build_messages(history, chunks)
         ),
         stream=True,
     )

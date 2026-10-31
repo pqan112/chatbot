@@ -6,3 +6,5 @@ pytest
 httpx
 requests
 markdownify
+psycopg[binary]
+pgvector
