@@ -6,5 +6,5 @@ pytest
 httpx
 requests
 markdownify
-psycopg[binary]
-pgvector
+openai 
+python-dotenv

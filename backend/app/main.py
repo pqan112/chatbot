@@ -1,58 +1,117 @@
-from typing import Literal, cast
+"""Daily job: re-scrape help-center articles, upload only the delta, log counts.
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam
-from pydantic import BaseModel
+Run: python -m app.main   (exit 0 on success, 1 on any failure)
+"""
 
-from .assistant import build_messages, retrieve
+import argparse
+import logging
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from openai import OpenAI
+
 from .config import settings
+from .ingestion.compare_articles import compare
+from .ingestion.hash_utils import sha256
+from .ingestion.upload_to_vector_store import ensure_store, upload
+from .scraper.convert_to_markdown import slugify, to_markdown
+from .scraper.fetch_articles import fetch_articles
+from .storage.manifest import load_manifest, save_run
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.cors_origin],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+ARTICLES = Path(__file__).resolve().parent.parent / "data" / "articles"
 
-client = AsyncOpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
-
-
-class Message(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+log = logging.getLogger("job")
 
 
-class ChatRequest(BaseModel):
-    messages: list[Message]
+def scrape(limit: int | None) -> list[dict]:
+    """Fetch, convert, write markdown when content changed. Returns per-article records."""
+    ARTICLES.mkdir(parents=True, exist_ok=True)
+    records = []
+    for a in fetch_articles(limit):
+        text = to_markdown(a)
+        path = ARTICLES / f"{slugify(a['title'])}-{a['id']}.md"
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            path.write_text(text, encoding="utf-8")
+        records.append(
+            {
+                "path": str(path),
+                "source_url": a["html_url"],
+                "title": a["title"],
+                "updated": a["updated_at"],
+                "hash": sha256(text),
+            }
+        )
+    return records
 
 
-async def token_stream(messages: list[Message]):
-    history = [m.model_dump() for m in messages]
-    query = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
-    chunks = await retrieve(client, query) if query else []
-    stream = await client.chat.completions.create(
-        model=settings.llm_model,
-        messages=cast(
-            list[ChatCompletionMessageParam], build_messages(history, chunks)
-        ),
-        stream=True,
+def run(limit: int | None) -> dict:
+    client = OpenAI(api_key=settings.openai_api_key)
+    store_id = ensure_store(client, settings.vector_store_id)
+    scraped = scrape(limit)
+    manifest = load_manifest(client, store_id)
+    delta = compare(scraped, manifest)
+    uploaded, failed = upload(client, store_id, delta.added + delta.updated, manifest)
+    return {
+        "scraped": len(scraped),
+        "added": len(delta.added),
+        "updated": len(delta.updated),
+        "skipped": len(delta.skipped),
+        "uploaded": uploaded,
+        "failed": failed,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Daily Chatbot knowledge-base sync")
+    parser.add_argument("-n", "--limit", type=int, help="max articles (default: all)")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    started = datetime.now(timezone.utc)
+    t0 = time.monotonic()
+    summary: dict = dict.fromkeys(
+        ("scraped", "added", "updated", "skipped", "uploaded", "failed"), 0
     )
-    async for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
-
-
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-
-@app.post("/chat")
-async def chat(req: ChatRequest):
-    return StreamingResponse(
-        token_stream(req.messages), media_type="text/plain; charset=utf-8"
+    error = None
+    try:
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        summary = run(args.limit)
+    except Exception as e:
+        log.exception("job failed")
+        error = str(e)
+    ok = error is None and summary["failed"] == 0
+    summary |= {
+        "status": "SUCCESS" if ok else "FAILED",
+        "started": started.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "duration_seconds": round(time.monotonic() - t0, 1),
+        "error": error,
+    }
+    save_run(summary)
+    bar = "=" * 40
+    log.info(
+        "%s\nChatbot Knowledge Base Sync\n%s\nStarted: %s\n\n"
+        "Total articles scraped: %d\n\nAdded:   %d\nUpdated: %d\nSkipped: %d\n\n"
+        "Uploaded: %d\nFailed:   %d\n\nStatus: %s\nDuration: %.1f seconds\n%s",
+        bar,
+        bar,
+        summary["started"],
+        summary["scraped"],
+        summary["added"],
+        summary["updated"],
+        summary["skipped"],
+        summary["uploaded"],
+        summary["failed"],
+        summary["status"],
+        summary["duration_seconds"],
+        bar,
     )
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
