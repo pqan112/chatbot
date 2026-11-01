@@ -36,25 +36,19 @@ A file is split into chunks before embedding. Static strategy, set explicitly (`
 | Setting                 | Value |
 | ----------------------- | ----- |
 | `max_chunk_size_tokens` | 800   |
-| `chunk_overlap_tokens`  | 400   |
+| `chunk_overlap_tokens`  | 200   |
 
 - Help-center articles are short step-by-step guides; 800 tokens is about one procedure, so one chunk usually holds a full answer.
-- 50% overlap keeps a numbered list from being cut from its context at a boundary.
-- Same as OpenAI's `auto` default; explicit so it is visible and tunable. It only applies to files attached afterwards: delete old files (or use a new store) to re-chunk.
+- 25% overlap is enough to keep a numbered list from losing its context at a boundary, without storing the same text twice (400 would duplicate half of every chunk, so more chunks, more storage, more near-duplicate search hits).
+- OpenAI's `auto` default is 800/400; explicit values are visible and tunable. It only applies to files attached afterwards: delete old files (or use a new store) to re-chunk.
 - OpenAI exposes no total-chunk count, so the job does not log one.
 
 ## Daily job (Render cron job, Docker runtime, schedule `0 0 * * *`)
 
 Set `OPENAI_API_KEY` and `VECTOR_STORE_ID` as Render env vars. Each run prints:
-
-```
-Total articles scraped: 35
-Added: 3   Updated: 2   Skipped: 30
-Uploaded: 5   Failed: 0
-Status: SUCCESS
-```
-
-Job logs: `<paste Render cron job logs URL>`
+Job events: `https://dashboard.render.com/cron/crn-dbj9hevb9u1s73ddgrf0/events`
+Job logs: `https://dashboard.render.com/cron/crn-dbj9hevb9u1s73ddgrf0/logs?r=2026-11-01%4001%3A45%3A50%7E2026-11-01%4001%3A48%3A10`
 
 ![assistant answer 1](screenshots/results/result_screenshot1.png)
 ![assistant answer 2](screenshots/results/result_screenshot2.png)
+![job log 1](screenshots/logs/job_log1.png)

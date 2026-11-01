@@ -29,7 +29,9 @@ def scrape(limit: int | None) -> list[dict]:
     """Fetch, convert, write markdown when content changed. Returns per-article records."""
     ARTICLES.mkdir(parents=True, exist_ok=True)
     records = []
-    for a in fetch_articles(limit):
+    articles = fetch_articles(limit)
+    log.info("fetched %d published articles from Zendesk", len(articles))
+    for a in articles:
         text = to_markdown(a)
         path = ARTICLES / f"{slugify(a['title'])}-{a['id']}.md"
         if not path.exists() or path.read_text(encoding="utf-8") != text:
@@ -51,7 +53,14 @@ def run(limit: int | None) -> dict:
     store_id = ensure_store(client, settings.vector_store_id)
     scraped = scrape(limit)
     manifest = load_manifest(client, store_id)
+    log.info("vector store %s holds %d files", store_id, len(manifest))
     delta = compare(scraped, manifest)
+    log.info(
+        "delta: added=%d updated=%d skipped=%d",
+        len(delta.added),
+        len(delta.updated),
+        len(delta.skipped),
+    )
     uploaded, failed = upload(client, store_id, delta.added + delta.updated, manifest)
     return {
         "scraped": len(scraped),
